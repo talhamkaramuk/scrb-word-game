@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="tr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Kelime Meydanı</title>
+    <link rel="icon" href="/assets/board-emblem.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/styles.css" />
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <section id="joinView" class="join-view" aria-labelledby="joinTitle">
+        <div class="join-art" aria-hidden="true">
+          <img src="/assets/board-emblem.svg" alt="" />
+        </div>
+        <div class="join-panel">
+          <p class="eyebrow">LAN + online kelime oyunu</p>
+          <h1 id="joinTitle">Kelime Meydanı</h1>
+          <form id="joinForm" class="join-form">
+            <label>
+              Oyuncu adı
+              <input id="playerName" name="playerName" maxlength="24" autocomplete="nickname" required />
+            </label>
+            <label>
+              Oda kodu
+              <input id="roomCode" name="roomCode" maxlength="8" autocomplete="off" placeholder="Boş bırak: yeni oda" />
+            </label>
+            <div class="join-actions">
+              <button id="createRoomButton" class="primary-button" type="button">Oda oluştur</button>
+              <button class="secondary-button" type="submit">Katıl</button>
+            </div>
+          </form>
+        </div>
+      </section>
+
+      <section id="gameView" class="game-view hidden" aria-label="Oyun alanı">
+        <main class="game-layout">
+          <section class="board-section" aria-label="Tahta">
+            <div id="boardViewport" class="board-viewport">
+              <div id="board" class="board" role="grid" aria-label="Kelime tahtası"></div>
+            </div>
+          </section>
+
+          <aside class="game-gui" aria-label="Oyun kontrol paneli">
+            <header class="top-bar">
+              <div class="brand-lockup">
+                <img src="/assets/board-emblem.svg" alt="" />
+                <div>
+                  <p>Kelime Meydanı</p>
+                  <div class="room-line">
+                    <strong id="roomBadge">ODA</strong>
+                    <button id="copyRoomButton" class="icon-button" type="button" title="Oda kodunu kopyala" aria-label="Oda kodunu kopyala">⧉</button>
+                  </div>
+                </div>
+              </div>
+              <div class="status-strip">
+                <span id="connectionStatus" class="status-pill">Bağlanıyor</span>
+                <span id="turnStatus" class="status-pill accent">Sıra bekleniyor</span>
+                <span id="timerStatus" class="status-pill timer-pill">Süre: --</span>
+                <span id="goalStatus" class="status-pill">Kelime: 0/100</span>
+                <span id="bagStatus" class="status-pill">Torba: 0</span>
+                <button id="soundButton" class="sound-button" type="button" aria-pressed="true">Ses açık</button>
+              </div>
+            </header>
+
+            <section class="side-panel" aria-label="Oyuncular ve geçmiş">
+              <div class="panel-heading">
+                <h2>Oyuncular</h2>
+                <button id="startButton" class="small-button" type="button">Başlat</button>
+              </div>
+              <div id="settingsPanel" class="settings-panel" aria-label="Oyun ayarları">
+                <label>
+                  Oyun büyüklüğü
+                  <select id="targetWordCount">
+                    <option value="50">50 kelime</option>
+                    <option value="100" selected>100 kelime</option>
+                    <option value="150">150 kelime</option>
+                    <option value="200">200+ kelime</option>
+                  </select>
+                </label>
+                <label>
+                  Hamle süresi
+                  <select id="turnSeconds">
+                    <option value="60">60 saniye</option>
+                    <option value="90" selected>90 saniye</option>
+                    <option value="120">120 saniye</option>
+                  </select>
+                </label>
+              </div>
+              <ol id="playersList" class="players-list"></ol>
+              <div class="panel-heading compact">
+                <h2>Geçmiş</h2>
+                <span id="dictionaryMode" class="mode-chip">Sözlük</span>
+              </div>
+              <ol id="moveLog" class="move-log"></ol>
+            </section>
+
+            <footer class="rack-bar" aria-label="Raf ve hamleler">
+              <div class="rack-tools">
+                <div class="segmented" role="group" aria-label="Raf modu">
+                  <button id="placeModeButton" class="selected" type="button">Yerleştir</button>
+                  <button id="exchangeModeButton" type="button">Değiştir</button>
+                </div>
+                <button id="clearButton" class="small-button" type="button">Temizle</button>
+                <button id="shuffleRackButton" class="small-button" type="button">Karıştır</button>
+              </div>
+              <div class="rack-stack">
+                <div id="movePreview" class="move-preview">Hamle bekleniyor</div>
+                <div id="rack" class="rack" aria-label="Harf rafı"></div>
+              </div>
+              <div class="turn-actions">
+                <button id="submitButton" class="primary-button" type="button">Hamleyi gönder</button>
+                <button id="exchangeButton" class="secondary-button" type="button">Seçili taşları değiştir</button>
+                <button id="passButton" class="secondary-button" type="button">Pas</button>
+              </div>
+            </footer>
+          </aside>
+        </main>
+      </section>
+
+      <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    </div>
+  </body>
+</html>

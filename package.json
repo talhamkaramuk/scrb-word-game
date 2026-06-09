@@ -1,0 +1,16 @@
+{
+  "name": "kelime-meydani",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "LAN and online browser word-board game with an authoritative local server.",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node server/index.js",
+    "test": "node --test",
+    "check": "node --check server/index.js && node --check src/shared/game-core.js && node --check public/app.js && node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
