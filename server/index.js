@@ -126,6 +126,12 @@ function handleUpgrade(req, socket) {
     return;
   }
 
+  if (!isAllowedWebSocketOrigin(req)) {
+    socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
+    socket.destroy();
+    return;
+  }
+
   const key = req.headers["sec-websocket-key"];
   if (typeof key !== "string") {
     socket.write("HTTP/1.1 400 Bad Request\r\n\r\n");
@@ -337,7 +343,7 @@ function handleReady(connection, message) {
 function handleSettings(connection, message) {
   const room = requireConnectionRoom(connection);
   setGameSettings(room, connection.playerId, {
-    targetWordCount: message.targetWordCount,
+    gameMode: message.gameMode,
     turnSeconds: message.turnSeconds
   });
   broadcastRoom(room);
@@ -353,6 +359,9 @@ function handleMove(connection, message) {
   const room = requireConnectionRoom(connection);
   if (expireTurnIfNeeded(room)) {
     broadcastRoom(room);
+    if (room.status !== "playing") {
+      return;
+    }
   }
   applyMove(room, connection.playerId, message.placements);
   broadcastRoom(room);
@@ -362,6 +371,9 @@ function handlePass(connection) {
   const room = requireConnectionRoom(connection);
   if (expireTurnIfNeeded(room)) {
     broadcastRoom(room);
+    if (room.status !== "playing") {
+      return;
+    }
   }
   passTurn(room, connection.playerId);
   broadcastRoom(room);
@@ -371,6 +383,9 @@ function handleExchange(connection, message) {
   const room = requireConnectionRoom(connection);
   if (expireTurnIfNeeded(room)) {
     broadcastRoom(room);
+    if (room.status !== "playing") {
+      return;
+    }
   }
   exchangeTiles(room, connection.playerId, Array.isArray(message.tileIds) ? message.tileIds : []);
   broadcastRoom(room);
@@ -475,6 +490,20 @@ function safeUrl(req) {
     return new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
   } catch {
     return null;
+  }
+}
+
+function isAllowedWebSocketOrigin(req) {
+  const origin = req.headers.origin;
+  if (!origin) {
+    return true;
+  }
+
+  try {
+    const originUrl = new URL(origin);
+    return originUrl.host === req.headers.host;
+  } catch {
+    return false;
   }
 }
 

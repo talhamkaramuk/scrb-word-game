@@ -30,6 +30,28 @@ cloudflared tunnel --url http://localhost:3000
 
 Kalıcı online kullanımda ücretsiz Cloudflare hesabıyla named tunnel kullanmak daha doğru olur. Quick Tunnel geçici URL üretir ve uptime garantisi vermez.
 
+## Arkadaşlarla Geçici Yayın
+
+Kısa süreli oyun için yeterli akış:
+
+```powershell
+npm.cmd start
+```
+
+Ayrı bir terminalde:
+
+```powershell
+cloudflared tunnel --url http://localhost:3000
+```
+
+`trycloudflare.com` linkini yalnızca oynayacak arkadaşlarla paylaş. Oyun bitince iki terminali de kapat; link devre dışı kalır. Quick Tunnel ücretsizdir, hesap gerektirmez ve her başlatmada yeni geçici link üretir.
+
+Windows shell `cloudflared` komutunu hemen görmezse kurulum yolundaki exe doğrudan çalıştırılabilir:
+
+```powershell
+& "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\Cloudflare.cloudflared_Microsoft.Winget.Source_8wekyb3d8bbwe\cloudflared.exe" tunnel --url http://localhost:3000
+```
+
 ## Oyun Durumu
 
 - Sunucu yetkilidir; puan, sıra, raf, torba ve tahta sunucuda tutulur.
@@ -39,9 +61,12 @@ Kalıcı online kullanımda ücretsiz Cloudflare hesabıyla named tunnel kullanm
 - İlk hamle merkezden geçmelidir.
 - Sonraki hamleler mevcut kelime ağına temas etmelidir.
 - Sözlük modu varsayılan olarak sıkıdır; sunucu sözlükte olmayan kelimeleri reddeder.
-- Oda sahibi oyun başlamadan hedef kelime sayısını 50, 100, 150 veya 200+ olarak seçebilir.
+- Oda sahibi oyun başlamadan oyun modunu seçebilir: Klasik, Hızlı 15 dk, Hızlı 30 dk veya Puan hedefi 250.
 - Oda sahibi oyun başlamadan hamle süresini 60, 90 veya 120 saniye olarak seçebilir.
-- Süre dolarsa sunucu oyuncuyu otomatik pas geçmiş sayar ve sırayı ilerletir.
+- Klasik mod torba/raf bitişi veya arka arkaya pas sınırıyla biter.
+- Hızlı modlarda maç süresi dolunca oyun mevcut skorlarla biter.
+- Puan hedefi modunda bir oyuncu 250 puana ulaşınca oyun biter.
+- Hamle süresi dolarsa sunucu oyuncuyu otomatik pas geçmiş sayar ve sırayı ilerletir.
 
 Geçici esnek sözlük modu:
 
@@ -55,13 +80,13 @@ Sözlük dosyası:
 data/dictionary.tr.txt
 ```
 
-Bu dosya başlangıç listesi içerir. Üretim kalitesinde Türkçe oyun için lisansı uygun, daha büyük bir kelime listesiyle değiştirilmelidir. Sıkı mod açıkken dosya boşsa sunucu güvenli şekilde başlamaz.
+Bu dosya kullanıcı tarafından oluşturulan Türkçe kelime listesini içerir. Sıkı mod açıkken dosya boşsa sunucu güvenli şekilde başlamaz.
 
 ## Arayüz ve Ses
 
 - Son oynanan taşlar tahtada vurgulanır.
-- Oyun ekranı görünmez iki bölüme ayrılır: sol bölüm tahtaya, sağ bölüm oyun arayüzüne ayrılır.
-- Tahta sol bölümde pencerenin izin verdiği en büyük kare alanı kaplar.
+- Oyun ekranı üç bölüme ayrılır: ortada tahta, sol panelde oda/ayar/raf kontrolleri, sağ panelde skorboard ve geçmiş bulunur.
+- Tahta orta bölümde pencerenin izin verdiği en büyük kare alanı kaplar.
 - Taşlar raftan tahtaya tut-bırak ile yerleştirilebilir.
 - Eldeki taşlar görsel olarak karıştırılabilir.
 - Raf seçimi, taş yerleştirme, hamle gönderme ve hata durumlarında kısa WebAudio tonları çalar.

@@ -36,13 +36,7 @@
 
       <section id="gameView" class="game-view hidden" aria-label="Oyun alanı">
         <main class="game-layout">
-          <section class="board-section" aria-label="Tahta">
-            <div id="boardViewport" class="board-viewport">
-              <div id="board" class="board" role="grid" aria-label="Kelime tahtası"></div>
-            </div>
-          </section>
-
-          <aside class="game-gui" aria-label="Oyun kontrol paneli">
+          <aside class="game-panel left-panel" aria-label="Oyun kontrolleri">
             <header class="top-bar">
               <div class="brand-lockup">
                 <img src="/assets/board-emblem.svg" alt="" />
@@ -58,25 +52,25 @@
                 <span id="connectionStatus" class="status-pill">Bağlanıyor</span>
                 <span id="turnStatus" class="status-pill accent">Sıra bekleniyor</span>
                 <span id="timerStatus" class="status-pill timer-pill">Süre: --</span>
-                <span id="goalStatus" class="status-pill">Kelime: 0/100</span>
+                <span id="goalStatus" class="status-pill">Mod: Klasik</span>
                 <span id="bagStatus" class="status-pill">Torba: 0</span>
                 <button id="soundButton" class="sound-button" type="button" aria-pressed="true">Ses açık</button>
               </div>
             </header>
 
-            <section class="side-panel" aria-label="Oyuncular ve geçmiş">
+            <section class="settings-card" aria-label="Oyun ayarları">
               <div class="panel-heading">
-                <h2>Oyuncular</h2>
+                <h2>Ayarlar</h2>
                 <button id="startButton" class="small-button" type="button">Başlat</button>
               </div>
               <div id="settingsPanel" class="settings-panel" aria-label="Oyun ayarları">
                 <label>
-                  Oyun büyüklüğü
-                  <select id="targetWordCount">
-                    <option value="50">50 kelime</option>
-                    <option value="100" selected>100 kelime</option>
-                    <option value="150">150 kelime</option>
-                    <option value="200">200+ kelime</option>
+                  Oyun modu
+                  <select id="gameMode">
+                    <option value="classic" selected>Klasik</option>
+                    <option value="timed15">Hızlı 15 dk</option>
+                    <option value="timed30">Hızlı 30 dk</option>
+                    <option value="score250">Puan hedefi 250</option>
                   </select>
                 </label>
                 <label>
@@ -88,12 +82,6 @@
                   </select>
                 </label>
               </div>
-              <ol id="playersList" class="players-list"></ol>
-              <div class="panel-heading compact">
-                <h2>Geçmiş</h2>
-                <span id="dictionaryMode" class="mode-chip">Sözlük</span>
-              </div>
-              <ol id="moveLog" class="move-log"></ol>
             </section>
 
             <footer class="rack-bar" aria-label="Raf ve hamleler">
@@ -115,6 +103,26 @@
                 <button id="passButton" class="secondary-button" type="button">Pas</button>
               </div>
             </footer>
+          </aside>
+
+          <section class="board-section" aria-label="Tahta">
+            <div id="boardViewport" class="board-viewport">
+              <div id="board" class="board" role="grid" aria-label="Kelime tahtası"></div>
+            </div>
+          </section>
+
+          <aside class="game-panel right-panel" aria-label="Skor ve geçmiş">
+            <section class="side-panel" aria-label="Oyuncular ve geçmiş">
+              <div class="panel-heading">
+                <h2>Skorboard</h2>
+                <span id="dictionaryMode" class="mode-chip">Sözlük</span>
+              </div>
+              <ol id="playersList" class="players-list"></ol>
+              <div class="panel-heading compact">
+                <h2>Geçmiş</h2>
+              </div>
+              <ol id="moveLog" class="move-log"></ol>
+            </section>
           </aside>
         </main>
       </section>

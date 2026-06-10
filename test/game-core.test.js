@@ -27,7 +27,16 @@ test("starts a room and deals private racks", () => {
   assert.equal(stateForP1.me.rack.length, 7);
   assert.equal(stateForP2.me.rack.length, 7);
   assert.equal(stateForP1.players[1].rackCount, 7);
+  assert.notEqual(stateForP1.me.id, "p1");
+  assert.equal(stateForP1.players.some((player) => player.id === "p1" || player.id === "p2"), false);
   assert.notDeepEqual(stateForP1.me.rack, stateForP2.me.rack);
+});
+
+test("requires at least two players to start", () => {
+  const game = createGame({ code: "TST", random: createSeededRandom(12) });
+  addPlayer(game, { id: "p1", name: "Ada" });
+
+  assert.throws(() => startGame(game, "p1"), /en az 2 oyuncu/);
 });
 
 test("first move must cross center", () => {
@@ -109,21 +118,36 @@ test("strict dictionary accepts real words from the configured word list", () =>
   assert.equal(game.currentPlayerId, "p2");
 });
 
-test("host can configure game size and turn duration before start", () => {
+test("host can configure game mode and turn duration before start", () => {
   const game = createGame({ code: "TST", random: createSeededRandom(13) });
   addPlayer(game, { id: "p1", name: "Ada" });
+  addPlayer(game, { id: "p2", name: "Bora" });
 
-  setGameSettings(game, "p1", { targetWordCount: 150, turnSeconds: 60 });
+  setGameSettings(game, "p1", { gameMode: "timed15", turnSeconds: 60 });
   startGame(game, "p1");
 
-  assert.equal(game.settings.targetWordCount, 150);
+  assert.equal(game.settings.gameMode, "timed15");
   assert.equal(game.settings.turnSeconds, 60);
+  assert.equal(game.gameDeadlineAt - game.gameStartedAt, 15 * 60_000);
   assert.equal(game.turnDeadlineAt - game.turnStartedAt, 60_000);
 });
 
-test("game finishes when configured word target is reached", () => {
-  const game = preparedGame({ settings: { targetWordCount: 50 } });
-  game.wordsPlayed = 49;
+test("classic mode does not end from an arbitrary word count", () => {
+  const game = preparedGame();
+  game.wordsPlayed = 999;
+
+  applyMove(game, "p1", [
+    { row: CENTER_INDEX, col: CENTER_INDEX - 1, tileId: "E1" },
+    { row: CENTER_INDEX, col: CENTER_INDEX, tileId: "L1" }
+  ]);
+
+  assert.equal(game.status, "playing");
+  assert.equal(game.wordsPlayed, 1000);
+});
+
+test("score target mode finishes when a player reaches the target", () => {
+  const game = preparedGame({ settings: { gameMode: "score250" } });
+  game.players[0].score = 248;
 
   applyMove(game, "p1", [
     { row: CENTER_INDEX, col: CENTER_INDEX - 1, tileId: "E1" },
@@ -131,7 +155,20 @@ test("game finishes when configured word target is reached", () => {
   ]);
 
   assert.equal(game.status, "finished");
-  assert.equal(game.wordsPlayed, 50);
+  assert.match(game.finishReason, /250 puan/);
+  assert.equal(game.players[0].score >= 250, true);
+});
+
+test("timed mode finishes when the match clock expires", () => {
+  const game = preparedGame({ settings: { gameMode: "timed15" } });
+  const expiredAt = game.gameDeadlineAt + 1;
+
+  const expired = expireTurnIfNeeded(game, expiredAt);
+
+  assert.equal(expired, true);
+  assert.equal(game.status, "finished");
+  assert.equal(game.currentPlayerId, null);
+  assert.match(game.finishReason, /süresi/);
 });
 
 test("expired turn is passed automatically", () => {

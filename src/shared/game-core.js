@@ -2,11 +2,18 @@ export const BOARD_SIZE = 15;
 export const CENTER_INDEX = Math.floor(BOARD_SIZE / 2);
 export const RACK_SIZE = 7;
 export const MAX_PLAYERS = 10;
+export const MIN_PLAYERS = 2;
 export const MAX_NAME_LENGTH = 24;
 export const BINGO_BONUS = 35;
-export const WORD_TARGET_OPTIONS = Object.freeze([50, 100, 150, 200]);
+export const GAME_MODES = Object.freeze({
+  CLASSIC: "classic",
+  TIMED_15: "timed15",
+  TIMED_30: "timed30",
+  SCORE_250: "score250"
+});
+export const GAME_MODE_OPTIONS = Object.freeze(Object.values(GAME_MODES));
 export const TURN_SECONDS_OPTIONS = Object.freeze([60, 90, 120]);
-export const DEFAULT_WORD_TARGET = 100;
+export const DEFAULT_GAME_MODE = GAME_MODES.CLASSIC;
 export const DEFAULT_TURN_SECONDS = 90;
 
 export const PREMIUMS = Object.freeze({
@@ -161,6 +168,13 @@ const LETTER_DOUBLE = [
 
 const PREMIUM_BY_COORD = buildPremiumMap();
 
+const GAME_MODE_CONFIG = Object.freeze({
+  [GAME_MODES.CLASSIC]: Object.freeze({ label: "Klasik" }),
+  [GAME_MODES.TIMED_15]: Object.freeze({ label: "Hızlı 15 dk", durationMs: 15 * 60 * 1000 }),
+  [GAME_MODES.TIMED_30]: Object.freeze({ label: "Hızlı 30 dk", durationMs: 30 * 60 * 1000 }),
+  [GAME_MODES.SCORE_250]: Object.freeze({ label: "Puan hedefi 250", scoreTarget: 250 })
+});
+
 export class GameRuleError extends Error {
   constructor(code, message) {
     super(message);
@@ -255,6 +269,8 @@ export function createGame({
     hostId: null,
     turnIndex: 0,
     currentPlayerId: null,
+    gameStartedAt: null,
+    gameDeadlineAt: null,
     turnStartedAt: null,
     turnDeadlineAt: null,
     consecutivePasses: 0,
@@ -295,6 +311,7 @@ export function addPlayer(game, { id, name, connected = true } = {}) {
 
   const player = {
     id,
+    publicId: createPublicPlayerId(game),
     name: sanitizeName(name),
     score: 0,
     rack: [],
@@ -338,7 +355,7 @@ export function setGameSettings(game, actorPlayerId, settings = {}) {
   game.settings = normalizeSettings({ ...game.settings, ...settings });
   logMove(
     game,
-    `Ayarlar güncellendi: ${game.settings.targetWordCount} kelime hedefi, ${game.settings.turnSeconds} saniye hamle süresi.`
+    `Ayarlar güncellendi: ${gameModeLabel(game.settings.gameMode)} modu, ${game.settings.turnSeconds} saniye hamle süresi.`
   );
   touch(game);
   return game.settings;
@@ -348,8 +365,8 @@ export function startGame(game, actorPlayerId) {
   if (game.status !== "waiting") {
     throw new GameRuleError("already_started", "Oyun zaten başladı.");
   }
-  if (game.players.length < 1) {
-    throw new GameRuleError("no_players", "Oyunu başlatmak için en az bir oyuncu gerekir.");
+  if (game.players.length < MIN_PLAYERS) {
+    throw new GameRuleError("not_enough_players", `Oyunu başlatmak için en az ${MIN_PLAYERS} oyuncu gerekir.`);
   }
   if (actorPlayerId && game.hostId !== actorPlayerId) {
     throw new GameRuleError("host_only", "Oyunu yalnızca oda sahibi başlatabilir.");
@@ -360,13 +377,17 @@ export function startGame(game, actorPlayerId) {
     player.ready = true;
   }
 
+  const now = Date.now();
+  const gameDurationMs = gameModeDurationMs(game.settings.gameMode);
   game.status = "playing";
   game.turnIndex = 0;
   game.currentPlayerId = game.players[0].id;
-  beginTurn(game, Date.now());
+  game.gameStartedAt = now;
+  game.gameDeadlineAt = gameDurationMs ? now + gameDurationMs : null;
+  beginTurn(game, now);
   game.consecutivePasses = 0;
   game.wordsPlayed = 0;
-  logMove(game, "Oyun başladı.");
+  logMove(game, `Oyun başladı: ${gameModeLabel(game.settings.gameMode)} modu.`);
   touch(game);
 }
 
@@ -397,8 +418,9 @@ export function applyMove(game, playerId, placements) {
   const bonusSummary = analysis.bingoBonus > 0 ? ` +${analysis.bingoBonus} seri bonusu` : "";
   logMove(game, `${player.name}: ${wordSummary} (${analysis.totalScore} puan${bonusSummary}).`);
 
-  if (game.wordsPlayed >= game.settings.targetWordCount) {
-    finishGame(game, `${game.settings.targetWordCount} kelimelik oyun hedefi tamamlandı.`);
+  const scoreTarget = gameModeScoreTarget(game.settings.gameMode);
+  if (scoreTarget && player.score >= scoreTarget) {
+    finishGame(game, `${player.name} ${scoreTarget} puan hedefine ulaştı.`, { applyRackPenalty: false });
   } else if (game.bag.length === 0 && player.rack.length === 0) {
     finishGame(game, `${player.name} rafını bitirdi.`);
   } else {
@@ -474,6 +496,8 @@ export function exchangeTiles(game, playerId, tileIds) {
 export function serializeGame(game, viewerId) {
   const now = Date.now();
   const me = game.players.find((player) => player.id === viewerId) || null;
+  const currentPlayer = game.players.find((player) => player.id === game.currentPlayerId) || null;
+  const hostPlayer = game.players.find((player) => player.id === game.hostId) || null;
   return {
     code: game.code,
     status: game.status,
@@ -487,7 +511,7 @@ export function serializeGame(game, viewerId) {
       }))
     ),
     players: game.players.map((player) => ({
-      id: player.id,
+      id: publicPlayerId(player),
       name: player.name,
       score: player.score,
       rackCount: player.rack.length,
@@ -497,21 +521,25 @@ export function serializeGame(game, viewerId) {
     })),
     me: me
       ? {
-          id: me.id,
+          id: publicPlayerId(me),
+          publicId: publicPlayerId(me),
           name: me.name,
           score: me.score,
           rack: me.rack.map(publicTile),
           host: me.id === game.hostId
         }
       : null,
-    hostId: game.hostId,
-    currentPlayerId: game.currentPlayerId,
-    currentPlayerName: game.players.find((player) => player.id === game.currentPlayerId)?.name || null,
+    hostId: hostPlayer ? publicPlayerId(hostPlayer) : null,
+    currentPlayerId: currentPlayer ? publicPlayerId(currentPlayer) : null,
+    currentPlayerName: currentPlayer?.name || null,
     bagCount: game.bag.length,
     settings: { ...game.settings },
     wordsPlayed: game.wordsPlayed,
     moveLog: game.moveLog.slice(-24),
     revision: game.revision,
+    gameStartedAt: game.gameStartedAt,
+    gameDeadlineAt: game.gameDeadlineAt,
+    gameRemainingMs: game.gameDeadlineAt ? Math.max(0, game.gameDeadlineAt - now) : null,
     turnStartedAt: game.turnStartedAt,
     turnDeadlineAt: game.turnDeadlineAt,
     turnRemainingMs: game.turnDeadlineAt ? Math.max(0, game.turnDeadlineAt - now) : null,
@@ -524,7 +552,18 @@ export function serializeGame(game, viewerId) {
 }
 
 export function expireTurnIfNeeded(game, now = Date.now()) {
-  if (game.status !== "playing" || !game.turnDeadlineAt || now < game.turnDeadlineAt) {
+  if (game.status !== "playing") {
+    return false;
+  }
+
+  if (game.gameDeadlineAt && now >= game.gameDeadlineAt) {
+    game.lastMoveCells = [];
+    finishGame(game, "Maç süresi doldu.", { applyRackPenalty: false });
+    touch(game);
+    return true;
+  }
+
+  if (!game.turnDeadlineAt || now < game.turnDeadlineAt) {
     return false;
   }
 
@@ -795,26 +834,29 @@ function scoreWords(board, words, playedTileCount) {
   };
 }
 
-function finishGame(game, reason) {
+function finishGame(game, reason, { applyRackPenalty = true } = {}) {
   if (game.status === "finished") {
     return;
   }
 
-  const remainingScores = new Map(
-    game.players.map((player) => [player.id, player.rack.reduce((sum, tile) => sum + tile.value, 0)])
-  );
-  const emptyRackPlayer = game.players.find((player) => player.rack.length === 0);
-  const totalRemaining = [...remainingScores.values()].reduce((sum, value) => sum + value, 0);
+  if (applyRackPenalty) {
+    const remainingScores = new Map(
+      game.players.map((player) => [player.id, player.rack.reduce((sum, tile) => sum + tile.value, 0)])
+    );
+    const emptyRackPlayer = game.players.find((player) => player.rack.length === 0);
+    const totalRemaining = [...remainingScores.values()].reduce((sum, value) => sum + value, 0);
 
-  for (const player of game.players) {
-    player.score -= remainingScores.get(player.id) ?? 0;
-    if (emptyRackPlayer && player.id === emptyRackPlayer.id) {
-      player.score += totalRemaining;
+    for (const player of game.players) {
+      player.score -= remainingScores.get(player.id) ?? 0;
+      if (emptyRackPlayer && player.id === emptyRackPlayer.id) {
+        player.score += totalRemaining;
+      }
     }
   }
 
   game.status = "finished";
   game.currentPlayerId = null;
+  game.gameDeadlineAt = null;
   game.turnStartedAt = null;
   game.turnDeadlineAt = null;
   game.finishReason = reason;
@@ -896,6 +938,20 @@ function publicTile(tile) {
   };
 }
 
+function publicPlayerId(player) {
+  return player.publicId || player.id;
+}
+
+function createPublicPlayerId(game) {
+  let id;
+  do {
+    id = `P${Math.floor(game.random() * 0xffffffff)
+      .toString(36)
+      .padStart(7, "0")}`;
+  } while (game.players.some((player) => player.publicId === id));
+  return id;
+}
+
 function logMove(game, text) {
   game.moveLog.push({
     id: `${Date.now()}-${game.moveLog.length + 1}`,
@@ -918,13 +974,29 @@ function beginTurn(game, now = Date.now()) {
 }
 
 function normalizeSettings(settings = {}) {
-  const targetWordCount = Number(settings.targetWordCount ?? DEFAULT_WORD_TARGET);
+  const gameMode = String(settings.gameMode ?? DEFAULT_GAME_MODE);
   const turnSeconds = Number(settings.turnSeconds ?? DEFAULT_TURN_SECONDS);
 
   return {
-    targetWordCount: WORD_TARGET_OPTIONS.includes(targetWordCount) ? targetWordCount : DEFAULT_WORD_TARGET,
+    gameMode: GAME_MODE_OPTIONS.includes(gameMode) ? gameMode : DEFAULT_GAME_MODE,
     turnSeconds: TURN_SECONDS_OPTIONS.includes(turnSeconds) ? turnSeconds : DEFAULT_TURN_SECONDS
   };
+}
+
+export function gameModeLabel(mode) {
+  return gameModeConfig(mode).label;
+}
+
+export function gameModeDurationMs(mode) {
+  return gameModeConfig(mode).durationMs || 0;
+}
+
+export function gameModeScoreTarget(mode) {
+  return gameModeConfig(mode).scoreTarget || 0;
+}
+
+function gameModeConfig(mode) {
+  return GAME_MODE_CONFIG[mode] || GAME_MODE_CONFIG[DEFAULT_GAME_MODE];
 }
 
 function coordKey(row, col) {

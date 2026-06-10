@@ -1,4 +1,4 @@
-import { CENTER_INDEX, premiumLabel, normalizeLetter } from "/shared/game-core.js";
+import { CENTER_INDEX, gameModeDurationMs, gameModeLabel, gameModeScoreTarget, premiumLabel, normalizeLetter } from "/shared/game-core.js";
 
 const STORAGE_KEYS = {
   playerId: "kelime-meydani.playerId",
@@ -47,8 +47,9 @@ const dom = {
   board: document.querySelector("#board"),
   playersList: document.querySelector("#playersList"),
   startButton: document.querySelector("#startButton"),
+  settingsCard: document.querySelector(".settings-card"),
   settingsPanel: document.querySelector("#settingsPanel"),
-  targetWordCount: document.querySelector("#targetWordCount"),
+  gameMode: document.querySelector("#gameMode"),
   turnSeconds: document.querySelector("#turnSeconds"),
   dictionaryMode: document.querySelector("#dictionaryMode"),
   moveLog: document.querySelector("#moveLog"),
@@ -73,12 +74,11 @@ dom.joinForm.addEventListener("submit", (event) => {
 });
 
 dom.createRoomButton.addEventListener("click", () => {
-  dom.roomCode.value = "";
-  joinRoom("");
+  joinRoom(dom.roomCode.value);
 });
 
 dom.startButton.addEventListener("click", () => send({ type: "start" }));
-dom.targetWordCount.addEventListener("change", sendSettings);
+dom.gameMode.addEventListener("change", sendSettings);
 dom.turnSeconds.addEventListener("change", sendSettings);
 dom.copyRoomButton.addEventListener("click", copyRoomCode);
 dom.soundButton.addEventListener("click", toggleSound);
@@ -225,7 +225,7 @@ function render() {
 function renderHeader() {
   dom.roomBadge.textContent = `Oda ${app.game.code}`;
   dom.bagStatus.textContent = `Torba: ${app.game.bagCount}`;
-  dom.goalStatus.textContent = `Kelime: ${app.game.wordsPlayed}/${app.game.settings.targetWordCount}`;
+  updateModeStatus();
   dom.dictionaryMode.textContent =
     app.game.dictionaryMode === "strict" ? `Sözlük: ${app.game.dictionaryCount}` : "Sözlük: esnek";
   renderSoundButton();
@@ -245,10 +245,11 @@ function renderHeader() {
 function renderSettings() {
   const waiting = app.game.status === "waiting";
   const host = Boolean(app.game.me?.host);
+  dom.settingsCard.hidden = !waiting;
   dom.settingsPanel.hidden = !waiting;
-  dom.targetWordCount.value = String(app.game.settings.targetWordCount);
+  dom.gameMode.value = String(app.game.settings.gameMode);
   dom.turnSeconds.value = String(app.game.settings.turnSeconds);
-  dom.targetWordCount.disabled = !waiting || !host;
+  dom.gameMode.disabled = !waiting || !host;
   dom.turnSeconds.disabled = !waiting || !host;
 }
 
@@ -304,18 +305,22 @@ function renderBoard() {
 function renderPlayers() {
   const sorted = [...app.game.players].sort((left, right) => right.score - left.score);
   dom.playersList.replaceChildren(
-    ...sorted.map((player) => {
+    ...sorted.map((player, index) => {
       const item = document.createElement("li");
       item.className = `player-row ${player.id === app.game.currentPlayerId ? "current" : ""}`;
 
       const name = document.createElement("div");
       name.className = "player-name";
+      const rank = document.createElement("span");
+      rank.className = "player-rank";
+      rank.textContent = String(index + 1);
       const dot = document.createElement("span");
+      dot.className = "player-connection";
       dot.textContent = player.connected ? "●" : "○";
       dot.style.color = player.connected ? "var(--field)" : "var(--muted)";
       const label = document.createElement("span");
       label.textContent = `${player.name}${player.host ? " ★" : ""}`;
-      name.append(dot, label);
+      name.append(rank, dot, label);
 
       const meta = document.createElement("div");
       meta.className = "player-meta";
@@ -714,12 +719,44 @@ function sendSettings() {
 
   send({
     type: "settings",
-    targetWordCount: Number(dom.targetWordCount.value),
+    gameMode: dom.gameMode.value,
     turnSeconds: Number(dom.turnSeconds.value)
   });
 }
 
+function updateModeStatus() {
+  if (!app.game) {
+    dom.goalStatus.textContent = "Mod: -";
+    dom.goalStatus.classList.remove("danger");
+    return;
+  }
+
+  const mode = app.game.settings?.gameMode || "classic";
+  const label = gameModeLabel(mode);
+  const scoreTarget = gameModeScoreTarget(mode);
+  const gameDurationMs = gameModeDurationMs(mode);
+  dom.goalStatus.classList.remove("danger");
+
+  if (app.game.status === "playing" && gameDurationMs > 0 && app.game.gameRemainingMs !== null) {
+    const elapsed = performance.now() - (app.game.receivedAt || performance.now());
+    const remainingMs = Math.max(0, app.game.gameRemainingMs - elapsed);
+    dom.goalStatus.textContent = `${label}: ${formatClock(remainingMs)}`;
+    dom.goalStatus.classList.toggle("danger", remainingMs <= 30_000);
+    return;
+  }
+
+  if (scoreTarget > 0) {
+    const leadingScore = Math.max(0, ...(app.game.players || []).map((player) => player.score));
+    dom.goalStatus.textContent = `Hedef: ${leadingScore}/${scoreTarget}`;
+    return;
+  }
+
+  dom.goalStatus.textContent = `Mod: ${label}`;
+}
+
 function updateTimerDisplay() {
+  updateModeStatus();
+
   if (!app.game || app.game.status !== "playing" || app.game.turnRemainingMs === null) {
     dom.timerStatus.textContent = `Süre: --`;
     dom.timerStatus.classList.remove("danger");
@@ -731,6 +768,13 @@ function updateTimerDisplay() {
   const seconds = Math.ceil(remainingMs / 1000);
   dom.timerStatus.textContent = `Süre: ${seconds}s`;
   dom.timerStatus.classList.toggle("danger", seconds <= 10);
+}
+
+function formatClock(milliseconds) {
+  const totalSeconds = Math.ceil(milliseconds / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
 }
 
 function toggleSound() {

@@ -197,23 +197,48 @@ select:focus-visible {
 }
 
 .game-layout {
+  --side-width: clamp(280px, 18vw, 340px);
   display: grid;
-  grid-template-columns: minmax(0, 1fr) clamp(340px, 30vw, 470px);
-  gap: 10px;
+  grid-template-columns: var(--side-width) minmax(0, 1fr) var(--side-width);
+  grid-template-areas: "left board right";
+  gap: 12px;
   width: 100%;
   height: 100%;
   min-height: 0;
-  padding: 10px;
+  padding: 12px;
   overflow: hidden;
 }
 
-.game-gui {
+.game-panel {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
   gap: 8px;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
+}
+
+.left-panel {
+  grid-area: left;
+  grid-template-rows: auto auto minmax(0, 1fr);
+}
+
+.right-panel {
+  grid-area: right;
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.settings-card {
+  display: grid;
+  grid-template-rows: auto auto;
+  gap: 8px;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  padding: 10px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 10px 26px rgba(24, 33, 43, 0.08);
 }
 
 .top-bar {
@@ -337,8 +362,16 @@ select:focus-visible {
   animation: status-pulse 720ms ease-in-out infinite;
 }
 
+.status-pill.danger {
+  color: #ffffff;
+  background: #9e2f28;
+  border-color: #9e2f28;
+  animation: status-pulse 720ms ease-in-out infinite;
+}
+
 .board-section {
   display: grid;
+  grid-area: board;
   place-items: center;
   width: 100%;
   height: 100%;
@@ -359,7 +392,7 @@ select:focus-visible {
 }
 
 .board {
-  --board-size: min(100%, calc(100dvh - 20px));
+  --board-size: min(100%, calc(100dvh - 24px));
   --board-cells: 15;
   display: grid;
   grid-template-columns: repeat(var(--board-cells), minmax(0, 1fr));
@@ -496,19 +529,35 @@ select:focus-visible {
 }
 
 .rack .tile-letter {
-  font-size: clamp(1.2rem, 3vw, 1.9rem);
+  align-self: end;
+  padding-bottom: 0;
+  font-size: clamp(0.98rem, 1.22vw, 1.36rem);
+  line-height: 0.9;
+}
+
+.rack .tile {
+  grid-template-rows: minmax(0, 1fr) auto;
+  align-items: center;
+  justify-items: center;
+  overflow: hidden;
+  padding: 5px 4px 3px;
 }
 
 .rack .tile-value {
-  right: 4px;
-  bottom: 3px;
-  font-size: clamp(0.58rem, 1.25vw, 0.78rem);
+  position: static;
+  grid-row: 2;
+  justify-self: end;
+  min-width: 1.12em;
+  height: 1.08em;
+  margin-top: -1px;
+  font-size: clamp(0.44rem, 0.58vw, 0.58rem);
 }
 
 .side-panel {
   display: grid;
-  grid-template-rows: auto auto minmax(76px, auto) auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(92px, auto) auto minmax(0, 1fr);
   min-height: 0;
+  height: 100%;
   padding: 10px;
   overflow: hidden;
   background: var(--panel);
@@ -592,7 +641,23 @@ select:focus-visible {
   font-weight: 900;
 }
 
-.player-name span {
+.player-rank {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 24px;
+  width: 24px;
+  height: 24px;
+  color: #ffffff;
+  background: var(--field-dark);
+  border-radius: 999px;
+  font-size: 0.75rem;
+}
+
+.player-connection {
+  flex: 0 0 auto;
+}
+
+.player-name span:not(.player-rank):not(.player-connection) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -683,6 +748,7 @@ select:focus-visible {
   display: grid;
   gap: 6px;
   min-width: 0;
+  overflow: hidden;
 }
 
 .rack-tools .small-button,
@@ -726,14 +792,18 @@ select:focus-visible {
 
 .rack {
   display: grid;
-  grid-template-columns: repeat(7, minmax(34px, 1fr));
+  grid-template-columns: repeat(7, minmax(0, 1fr));
   justify-content: stretch;
-  gap: 5px;
-  min-height: 48px;
+  gap: clamp(3px, 0.45vw, 5px);
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  padding: 6px 0 2px;
 }
 
 .rack-tile {
   aspect-ratio: 1;
+  min-width: 0;
   padding: 0;
   border: 0;
   border-radius: 7px;
@@ -922,7 +992,7 @@ select:focus-visible {
 
 @media (min-width: 1280px) {
   .game-layout {
-    grid-template-columns: minmax(0, 1fr) clamp(380px, 28vw, 500px);
+    --side-width: clamp(300px, 18vw, 350px);
     gap: 12px;
     padding: 12px;
   }
@@ -932,26 +1002,42 @@ select:focus-visible {
   }
 
   .rack {
-    grid-template-columns: repeat(7, minmax(40px, 1fr));
-    min-height: 56px;
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 1180px) {
+  .game-layout {
+    --side-width: clamp(250px, 24vw, 300px);
+    gap: 8px;
+    padding: 8px;
+  }
+
+  .top-bar,
+  .settings-card,
+  .side-panel,
+  .rack-bar {
+    padding: 8px;
+  }
+
+  .settings-panel {
+    grid-template-columns: 1fr;
   }
 }
 
 @media (max-width: 980px) {
   .game-layout {
     grid-template-columns: minmax(0, 1fr) 320px;
+    grid-template-rows: minmax(0, 1fr) minmax(170px, 28vh);
+    grid-template-areas:
+      "board left"
+      "right right";
     gap: 8px;
     padding: 8px;
   }
 
-  .top-bar,
-  .side-panel,
-  .rack-bar {
-    padding: 8px;
-  }
-
   .side-panel {
-    grid-template-rows: auto auto minmax(64px, auto) auto minmax(0, 1fr);
+    grid-template-rows: auto minmax(64px, auto) auto minmax(0, 1fr);
   }
 
   .rack-tools,
@@ -961,13 +1047,37 @@ select:focus-visible {
 }
 
 @media (max-width: 780px) {
-  .game-layout {
-    grid-template-columns: 1fr;
-    grid-template-rows: minmax(0, 56vh) minmax(0, 1fr);
+  body {
+    overflow: auto;
   }
 
-  .game-gui {
-    grid-template-rows: auto minmax(0, 1fr) auto;
+  .game-view {
+    height: auto;
+    min-height: 100vh;
+    overflow: visible;
+  }
+
+  .game-layout {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto auto;
+    grid-template-areas:
+      "board"
+      "left"
+      "right";
+    min-height: 100vh;
+    overflow: visible;
+  }
+
+  .game-panel,
+  .settings-card,
+  .side-panel,
+  .rack-bar {
+    overflow: visible;
+  }
+
+  .board-section {
+    height: min(58vh, calc(100vw - 16px));
+    min-height: 300px;
   }
 
   .board {
@@ -975,7 +1085,7 @@ select:focus-visible {
   }
 
   .side-panel {
-    grid-template-rows: auto auto auto auto minmax(0, 1fr);
+    grid-template-rows: auto auto auto auto;
   }
 }
 
@@ -1018,7 +1128,7 @@ select:focus-visible {
   }
 
   .rack {
-    grid-template-columns: repeat(7, minmax(32px, 1fr));
+    grid-template-columns: repeat(7, minmax(0, 1fr));
     gap: 4px;
   }
 
