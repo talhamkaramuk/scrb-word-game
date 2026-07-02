@@ -1,5 +1,6 @@
-# Başlangıç sözlüğü. Üretim kalitesinde oyun için bu dosyayı lisansı uygun,
-# daha geniş bir Türkçe kelime listesiyle değiştirebilirsiniz.
+# Türkçe oyun sözlüğü. Düz satırlar geriye uyumludur ve oynanabilir kelime sayılır.
+# TSV formatı: word<TAB>source<TAB>license<TAB>minLength<TAB>flags
+# flags: allowed|proper_noun|abbreviation|archaic|slang
 AB
 ABA
 ABACI

@@ -10,14 +10,30 @@ import {
   createGame,
   exchangeTiles,
   expireTurnIfNeeded,
-  normalizeWord,
   passTurn,
   serializeGame,
   setGameSettings,
   setPlayerConnection,
-  setReady,
   startGame
 } from "../src/shared/game-core.js";
+import { loadDictionaryFile } from "./dictionary.js";
+import {
+  clientIpFromRequest,
+  connectionLimitStatus,
+  createWindowedActionLimiter,
+  shouldPruneRoom
+} from "./lifecycle-limits.js";
+import { createSessionStore } from "./sessions.js";
+import { resolveStaticPath } from "./static-paths.js";
+import {
+  CLOSE_CODES,
+  OPCODES,
+  createWebSocketAccept,
+  encodeWebSocketClosePayload,
+  encodeWebSocketFrame,
+  parseWebSocketFrames,
+  validateWebSocketHandshakeHeaders
+} from "./websocket-protocol.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -33,16 +49,33 @@ const MAX_MESSAGE_BYTES = 16 * 1024;
 const MAX_MESSAGES_PER_WINDOW = 40;
 const RATE_WINDOW_MS = 1000;
 const ROOM_IDLE_MS = 6 * 60 * 60 * 1000;
+const WAITING_ROOM_IDLE_MS = 30 * 60 * 1000;
+const MAX_ACTIVE_ROOMS = 50;
+const MAX_CONNECTIONS_PER_IP = 12;
+const MAX_CONNECTIONS_PER_SUBNET = 40;
+const MAX_ROOM_CREATES_PER_IP = 6;
+const ROOM_CREATE_WINDOW_MS = 10 * 60 * 1000;
 const HEARTBEAT_MS = 30 * 1000;
-const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 const rooms = new Map();
 const connections = new Set();
-const dictionary = loadDictionary();
+const sessionStore = createSessionStore();
+const roomCreateLimiter = createWindowedActionLimiter({
+  limit: MAX_ROOM_CREATES_PER_IP,
+  windowMs: ROOM_CREATE_WINDOW_MS
+});
+const dictionary = loadDictionaryFile(path.join(DATA_DIR, "dictionary.tr.txt"));
 
-if (STRICT_DICTIONARY && dictionary.size === 0) {
+if (STRICT_DICTIONARY && dictionary.words.size === 0) {
   console.error("Strict dictionary mode is enabled, but data/dictionary.tr.txt is empty or missing.");
   process.exit(1);
+}
+
+for (const warning of dictionary.warnings.slice(0, 5)) {
+  console.warn(warning);
+}
+if (dictionary.warnings.length > 5) {
+  console.warn(`Dictionary has ${dictionary.warnings.length - 5} more warnings.`);
 }
 
 const server = http.createServer(handleHttpRequest);
@@ -51,7 +84,9 @@ server.on("upgrade", handleUpgrade);
 server.listen(PORT, HOST, () => {
   console.log(`Kelime Meydanı running at http://localhost:${PORT}`);
   console.log(`LAN clients can use http://<this-computer-ip>:${PORT}`);
-  console.log(`Dictionary mode: ${STRICT_DICTIONARY ? "strict" : "open"} (${dictionary.size} words)`);
+  console.log(
+    `Dictionary mode: ${STRICT_DICTIONARY ? "strict" : "open"} (${dictionary.words.size} playable words, ${dictionary.stats.rejected} rejected metadata entries)`
+  );
 });
 
 setInterval(() => {
@@ -77,10 +112,20 @@ setInterval(() => {
   const now = Date.now();
   for (const [code, room] of rooms) {
     const hasConnections = [...connections].some((connection) => connection.roomCode === code);
-    if (!hasConnections && now - room.updatedAt > ROOM_IDLE_MS) {
+    if (
+      shouldPruneRoom(room, {
+        hasConnections,
+        now,
+        idleRoomMs: ROOM_IDLE_MS,
+        waitingRoomIdleMs: WAITING_ROOM_IDLE_MS
+      })
+    ) {
       rooms.delete(code);
+      sessionStore.deleteRoomSessions(code);
     }
   }
+  sessionStore.pruneExpired();
+  roomCreateLimiter.prune();
 }, 10 * 60 * 1000).unref();
 
 function handleHttpRequest(req, res) {
@@ -95,15 +140,30 @@ function handleHttpRequest(req, res) {
       ok: true,
       rooms: rooms.size,
       connections: connections.size,
+      sessions: sessionStore.size,
       dictionaryMode: STRICT_DICTIONARY ? "strict" : "open",
-      dictionaryCount: dictionary.size
+      dictionaryCount: dictionary.words.size,
+      dictionaryStats: dictionary.stats
     });
     return;
   }
 
-  const route = resolveStaticPath(url.pathname);
-  if (!route) {
-    sendText(res, 403, "Forbidden");
+  if (!["GET", "HEAD"].includes(req.method)) {
+    res.writeHead(405, {
+      Allow: "GET, HEAD",
+      "Content-Type": "text/plain; charset=utf-8",
+      "X-Content-Type-Options": "nosniff"
+    });
+    res.end("Method not allowed");
+    return;
+  }
+
+  const route = resolveStaticPath(url.pathname, {
+    publicDir: PUBLIC_DIR,
+    sharedDir: SHARED_DIR
+  });
+  if (route.status !== 200) {
+    sendText(res, route.status, route.status === 400 ? "Bad request" : "Not found");
     return;
   }
 
@@ -114,6 +174,10 @@ function handleHttpRequest(req, res) {
     }
 
     res.writeHead(200, securityHeaders(route.filePath));
+    if (req.method === "HEAD") {
+      res.end();
+      return;
+    }
     fs.createReadStream(route.filePath).pipe(res);
   });
 }
@@ -121,25 +185,32 @@ function handleHttpRequest(req, res) {
 function handleUpgrade(req, socket) {
   const url = safeUrl(req);
   if (!url || url.pathname !== "/ws") {
-    socket.write("HTTP/1.1 404 Not Found\r\n\r\n");
-    socket.destroy();
+    rejectSocketUpgrade(socket, 404);
     return;
   }
 
   if (!isAllowedWebSocketOrigin(req)) {
-    socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
-    socket.destroy();
+    rejectSocketUpgrade(socket, 403);
     return;
   }
 
-  const key = req.headers["sec-websocket-key"];
-  if (typeof key !== "string") {
-    socket.write("HTTP/1.1 400 Bad Request\r\n\r\n");
-    socket.destroy();
+  const handshake = validateWebSocketHandshakeHeaders(req.headers);
+  if (!handshake.ok) {
+    rejectSocketUpgrade(socket, handshake.status, handshake.headers);
     return;
   }
 
-  const accept = crypto.createHash("sha1").update(`${key}${WS_GUID}`).digest("base64");
+  const clientIp = clientIpFromRequest(req);
+  const connectionLimit = connectionLimitStatus(connections, clientIp, {
+    maxConnectionsPerIp: MAX_CONNECTIONS_PER_IP,
+    maxConnectionsPerSubnet: MAX_CONNECTIONS_PER_SUBNET
+  });
+  if (!connectionLimit.allowed) {
+    rejectSocketUpgrade(socket, 429);
+    return;
+  }
+
+  const accept = createWebSocketAccept(handshake.key);
   socket.write(
     [
       "HTTP/1.1 101 Switching Protocols",
@@ -157,6 +228,8 @@ function handleUpgrade(req, socket) {
     alive: true,
     roomCode: null,
     playerId: null,
+    clientIp,
+    clientSubnet: connectionLimit.clientSubnet,
     messageWindowStart: Date.now(),
     messageCount: 0
   };
@@ -169,89 +242,51 @@ function handleUpgrade(req, socket) {
   socket.on("error", () => detachConnection(connection));
 }
 
+function rejectSocketUpgrade(socket, status, headers = {}) {
+  const statusText = {
+    400: "Bad Request",
+    403: "Forbidden",
+    404: "Not Found",
+    426: "Upgrade Required",
+    429: "Too Many Requests"
+  }[status] || "Error";
+  const headerLines = Object.entries(headers).map(([name, value]) => `${name}: ${value}`);
+  socket.write([`HTTP/1.1 ${status} ${statusText}`, ...headerLines, "\r\n"].join("\r\n"));
+  socket.destroy();
+}
+
 function handleSocketData(connection, chunk) {
-  connection.buffer = Buffer.concat([connection.buffer, chunk]);
+  const parsed = parseWebSocketFrames(connection.buffer, chunk, {
+    maxPayloadBytes: MAX_MESSAGE_BYTES
+  });
+  connection.buffer = parsed.remainingBuffer;
 
-  while (connection.buffer.length >= 2) {
-    const first = connection.buffer[0];
-    const second = connection.buffer[1];
-    const fin = Boolean(first & 0x80);
-    const opcode = first & 0x0f;
-    const masked = Boolean(second & 0x80);
-    let payloadLength = second & 0x7f;
-    let offset = 2;
+  if (parsed.error) {
+    closeConnection(connection, parsed.error.code, parsed.error.reason);
+    return;
+  }
 
-    if (!fin) {
-      closeConnection(connection, 1003, "Fragmented frames are not supported");
+  for (const frame of parsed.frames) {
+    if (frame.opcode === OPCODES.CLOSE) {
+      closeConnection(connection, CLOSE_CODES.NORMAL, "Closed");
       return;
     }
-
-    if (payloadLength === 126) {
-      if (connection.buffer.length < offset + 2) {
-        return;
-      }
-      payloadLength = connection.buffer.readUInt16BE(offset);
-      offset += 2;
-    } else if (payloadLength === 127) {
-      if (connection.buffer.length < offset + 8) {
-        return;
-      }
-      const bigLength = connection.buffer.readBigUInt64BE(offset);
-      if (bigLength > BigInt(MAX_MESSAGE_BYTES)) {
-        closeConnection(connection, 1009, "Message too large");
-        return;
-      }
-      payloadLength = Number(bigLength);
-      offset += 8;
-    }
-
-    if (!masked) {
-      closeConnection(connection, 1002, "Client frames must be masked");
-      return;
-    }
-
-    if (payloadLength > MAX_MESSAGE_BYTES) {
-      closeConnection(connection, 1009, "Message too large");
-      return;
-    }
-
-    if (connection.buffer.length < offset + 4 + payloadLength) {
-      return;
-    }
-
-    const mask = connection.buffer.subarray(offset, offset + 4);
-    offset += 4;
-    const payload = Buffer.from(connection.buffer.subarray(offset, offset + payloadLength));
-    connection.buffer = connection.buffer.subarray(offset + payloadLength);
-
-    for (let index = 0; index < payload.length; index += 1) {
-      payload[index] ^= mask[index % 4];
-    }
-
-    if (opcode === 0x8) {
-      closeConnection(connection, 1000, "Closed");
-      return;
-    }
-    if (opcode === 0x9) {
-      sendFrame(connection, payload, 0xA);
+    if (frame.opcode === OPCODES.PING) {
+      sendFrame(connection, frame.payload, OPCODES.PONG);
       continue;
     }
-    if (opcode === 0xA) {
+    if (frame.opcode === OPCODES.PONG) {
       connection.alive = true;
       continue;
     }
-    if (opcode !== 0x1) {
-      closeConnection(connection, 1003, "Unsupported frame type");
-      return;
-    }
 
-    handleClientMessage(connection, payload.toString("utf8"));
+    handleClientMessage(connection, frame.payload.toString("utf8"));
   }
 }
 
 function handleClientMessage(connection, rawMessage) {
   if (!checkRateLimit(connection)) {
-    sendError(connection, "Çok hızlı mesaj gönderildi; lütfen yavaşla.");
+    sendError(connection, "Çok hızlı mesaj gönderildi; lütfen yavaşla.", "rate_limited");
     return;
   }
 
@@ -267,9 +302,6 @@ function handleClientMessage(connection, rawMessage) {
     switch (message.type) {
       case "join":
         handleJoin(connection, message);
-        break;
-      case "ready":
-        handleReady(connection, message);
         break;
       case "settings":
         handleSettings(connection, message);
@@ -302,17 +334,29 @@ function handleClientMessage(connection, rawMessage) {
 
 function handleJoin(connection, message) {
   const code = normalizeRoomCode(message.roomCode) || createRoomCode();
-  const playerId = typeof message.playerId === "string" && message.playerId.length <= 80 ? message.playerId : crypto.randomUUID();
   let room = rooms.get(code);
 
   if (!room) {
+    if (rooms.size >= MAX_ACTIVE_ROOMS) {
+      throw new GameRuleError("room_limit", "Sunucu aktif oda sınırına ulaştı; lütfen biraz sonra tekrar dene.");
+    }
+    if (!roomCreateLimiter.allow(connection.clientIp)) {
+      throw new GameRuleError("room_create_limited", "Çok hızlı oda oluşturuldu; lütfen biraz sonra tekrar dene.");
+    }
     room = createGame({
       code,
-      dictionary,
+      dictionary: dictionary.words,
       strictDictionary: STRICT_DICTIONARY
     });
     rooms.set(code, room);
   }
+
+  const reconnectSession = sessionStore.verifySession({
+    sessionId: message.sessionId,
+    reconnectToken: message.reconnectToken,
+    roomCode: code
+  });
+  const playerId = reconnectSession?.playerId || crypto.randomUUID();
 
   if (connection.roomCode && connection.playerId) {
     detachConnection(connection);
@@ -323,20 +367,22 @@ function handleJoin(connection, message) {
     name: message.name,
     connected: true
   });
+  const issuedSession = reconnectSession
+    ? null
+    : sessionStore.createSession({
+        roomCode: code,
+        playerId: player.id
+      });
 
   connection.roomCode = code;
   connection.playerId = player.id;
   sendJsonFrame(connection, {
     type: "joined",
     roomCode: code,
-    playerId: player.id
+    sessionId: reconnectSession?.sessionId || issuedSession.sessionId,
+    reconnectToken: issuedSession?.reconnectToken,
+    sessionExpiresAt: reconnectSession?.expiresAt || issuedSession.expiresAt
   });
-  broadcastRoom(room);
-}
-
-function handleReady(connection, message) {
-  const room = requireConnectionRoom(connection);
-  setReady(room, connection.playerId, message.ready !== false);
   broadcastRoom(room);
 }
 
@@ -414,14 +460,19 @@ function broadcastRoom(room) {
 }
 
 function detachConnection(connection) {
+  const roomCode = connection.roomCode;
+  const playerId = connection.playerId;
   const wasPresent = connections.delete(connection);
   if (!wasPresent) {
     return;
   }
 
-  if (connection.roomCode && connection.playerId) {
-    const room = rooms.get(connection.roomCode);
-    if (room && setPlayerConnection(room, connection.playerId, false)) {
+  if (roomCode && playerId) {
+    const hasAnotherConnection = [...connections].some(
+      (candidate) => candidate.roomCode === roomCode && candidate.playerId === playerId
+    );
+    const room = rooms.get(roomCode);
+    if (!hasAnotherConnection && room && setPlayerConnection(room, playerId, false)) {
       broadcastRoom(room);
     }
   }
@@ -449,37 +500,17 @@ function sendError(connection, message, code = "bad_request") {
   });
 }
 
-function sendFrame(connection, payload, opcode = 0x1) {
+function sendFrame(connection, payload, opcode = OPCODES.TEXT) {
   if (connection.socket.destroyed) {
     return;
   }
 
-  const length = payload.length;
-  let header;
-  if (length < 126) {
-    header = Buffer.from([0x80 | opcode, length]);
-  } else if (length < 65536) {
-    header = Buffer.alloc(4);
-    header[0] = 0x80 | opcode;
-    header[1] = 126;
-    header.writeUInt16BE(length, 2);
-  } else {
-    header = Buffer.alloc(10);
-    header[0] = 0x80 | opcode;
-    header[1] = 127;
-    header.writeBigUInt64BE(BigInt(length), 2);
-  }
-
-  connection.socket.write(Buffer.concat([header, payload]));
+  connection.socket.write(encodeWebSocketFrame(payload, opcode));
 }
 
 function closeConnection(connection, code, reason) {
   if (!connection.socket.destroyed) {
-    const reasonBuffer = Buffer.from(reason || "", "utf8");
-    const payload = Buffer.alloc(2 + reasonBuffer.length);
-    payload.writeUInt16BE(code, 0);
-    reasonBuffer.copy(payload, 2);
-    sendFrame(connection, payload, 0x8);
+    sendFrame(connection, encodeWebSocketClosePayload(code, reason), OPCODES.CLOSE);
     connection.socket.end();
   }
   detachConnection(connection);
@@ -505,25 +536,6 @@ function isAllowedWebSocketOrigin(req) {
   } catch {
     return false;
   }
-}
-
-function resolveStaticPath(urlPath) {
-  const decodedPath = decodeURIComponent(urlPath);
-  if (decodedPath.startsWith("/shared/")) {
-    return resolveFromRoot(SHARED_DIR, decodedPath.slice("/shared/".length));
-  }
-
-  const relativePath = decodedPath === "/" ? "index.html" : decodedPath.slice(1);
-  return resolveFromRoot(PUBLIC_DIR, relativePath);
-}
-
-function resolveFromRoot(root, relativePath) {
-  const normalized = path.normalize(relativePath).replace(/^(\.\.(\/|\\|$))+/, "");
-  const filePath = path.resolve(root, normalized);
-  if (!filePath.startsWith(root)) {
-    return null;
-  }
-  return { filePath };
 }
 
 function securityHeaders(filePath) {
@@ -589,24 +601,4 @@ function createRoomCode() {
     }
   }
   return crypto.randomUUID().replace(/-/g, "").slice(0, 8).toUpperCase();
-}
-
-function loadDictionary() {
-  const dictionaryPath = path.join(DATA_DIR, "dictionary.tr.txt");
-  try {
-    const contents = fs.readFileSync(dictionaryPath, "utf8");
-    return new Set(
-      contents
-        .split(/\r?\n/)
-        .map((line) => line.replace(/#.*/, "").trim())
-        .filter(Boolean)
-        .map(normalizeWord)
-        .filter(Boolean)
-    );
-  } catch (error) {
-    if (error.code !== "ENOENT") {
-      console.warn(`Dictionary could not be loaded: ${error.message}`);
-    }
-    return new Set();
-  }
 }

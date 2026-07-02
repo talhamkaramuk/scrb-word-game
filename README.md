@@ -67,6 +67,7 @@ Windows shell `cloudflared` komutunu hemen görmezse kurulum yolundaki exe doğr
 - Hızlı modlarda maç süresi dolunca oyun mevcut skorlarla biter.
 - Puan hedefi modunda bir oyuncu 250 puana ulaşınca oyun biter.
 - Hamle süresi dolarsa sunucu oyuncuyu otomatik pas geçmiş sayar ve sırayı ilerletir.
+- Sırası gelen oyuncunun bağlantısı koparsa 15 saniye içinde geri dönmezse sunucu oyuncuyu otomatik pas geçmiş sayar.
 
 Geçici esnek sözlük modu:
 
@@ -81,6 +82,16 @@ data/dictionary.tr.txt
 ```
 
 Bu dosya kullanıcı tarafından oluşturulan Türkçe kelime listesini içerir. Sıkı mod açıkken dosya boşsa sunucu güvenli şekilde başlamaz.
+
+Sözlük satırları iki formatı destekler:
+
+```text
+KELİME
+word	source	license	minLength	flags
+KELİME	local-user	user-provided	2	allowed
+```
+
+Düz satırlar geriye uyumludur ve `source=local-user`, `license=user-provided`, `minLength=2`, `flags=allowed` kabul edilir. TSV formatındaki `flags` alanı `allowed`, `proper_noun`, `abbreviation`, `archaic`, `slang` değerlerini `|` ile alabilir. Varsayılan oyun politikası özel isimleri ve kısaltmaları reddeder; arkaik veya argo kelimeler yalnızca `allowed` flag'iyle bilinçli olarak oynanabilir hale gelir. Türkçe çekimli formlar ayrı bir morfoloji motoruyla üretilmez; dosyada yer alan çekimli formlar kabul edilir.
 
 ## Arayüz ve Ses
 
@@ -106,10 +117,23 @@ Ek sözdizimi ve test kontrolü:
 npm run check
 ```
 
+Release öncesi aynı kapıyı açık isimle çalıştırmak için:
+
+```powershell
+npm run check:release
+```
+
+Bu kontrol sunucu/paylaşılan/client dosyalarının sözdizimini, sözlük veri kontratını, unit testleri ve gerçek HTTP/WebSocket integration testlerini çalıştırır.
+
 ## Güvenlik ve Dağıtım Notları
 
 - Oyun sunucusu istemciden gelen hamleleri yeniden doğrular.
 - Raf bilgisi yalnızca ilgili oyuncuya gönderilir.
+- Tarayıcı yeniden bağlanması için public oyuncu kimliği kullanılmaz; sunucu, sadece ilgili tarayıcıya verilen `sessionId` ve `reconnectToken` ikilisini kabul eder.
+- Reconnect token düz metin olarak sunucuda saklanmaz; sunucuda yalnızca SHA-256 hash tutulur.
 - Basit WebSocket hız limiti vardır.
+- WebSocket upgrade ve frame parser katmanı sürüm/key doğrular, kısmi frame buffer'ını sınırlar ve hatalı frame'leri oyun mantığına ulaşmadan kapatır.
+- Aktif oda sayısı, IP/subnet başına WebSocket bağlantısı ve IP başına oda oluşturma sayısı sunucu tarafında sınırlandırılır.
+- Hiç başlamamış ve bağlantısı kalmamış odalar, başlamış odalardan daha kısa sürede temizlenir.
 - Statik dosyalar güvenli kök dizinlerinden yayınlanır ve temel güvenlik başlıkları eklenir.
 - Public internete açarken doğrudan router port yönlendirmesi yerine Cloudflare Tunnel önerilir.

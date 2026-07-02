@@ -8,7 +8,8 @@
     "start": "node server/index.js",
     "dev": "node server/index.js",
     "test": "node --test",
-    "check": "node --check server/index.js && node --check src/shared/game-core.js && node --check public/app.js && node --test"
+    "check": "node --check server/index.js && node --check server/dictionary.js && node --check server/lifecycle-limits.js && node --check server/sessions.js && node --check server/static-paths.js && node --check server/websocket-protocol.js && node --check src/shared/game-core.js && node --check src/shared/client-logic.js && node --check public/app.js && node --check scripts/check-dictionary.js && node scripts/check-dictionary.js && node --test",
+    "check:release": "npm run check"
   },
   "engines": {
     "node": ">=20"

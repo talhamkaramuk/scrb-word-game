@@ -1,23 +1,36 @@
-import { CENTER_INDEX, gameModeDurationMs, gameModeLabel, gameModeScoreTarget, premiumLabel, normalizeLetter } from "/shared/game-core.js";
+import { CENTER_INDEX, gameModeDurationMs, gameModeLabel, gameModeScoreTarget, premiumLabel } from "/shared/game-core.js";
+import {
+  createJoinRequest,
+  normalizeBlankTileInput,
+  shouldAutoJoinAfterReconnect,
+  timerDisplayState
+} from "/shared/client-logic.js";
 
 const STORAGE_KEYS = {
-  playerId: "kelime-meydani.playerId",
+  sessionId: "kelime-meydani.sessionId",
+  reconnectToken: "kelime-meydani.reconnectToken",
   playerName: "kelime-meydani.playerName",
   roomCode: "kelime-meydani.roomCode",
   sound: "kelime-meydani.sound"
 };
 
+const LEGACY_PLAYER_ID_KEY = "kelime-meydani.playerId";
+const POINTER_DRAG_THRESHOLD = 6;
+
 const app = {
   socket: null,
   reconnectTimer: null,
   reconnectAttempts: 0,
-  playerId: localStorage.getItem(STORAGE_KEYS.playerId) || "",
+  sessionId: localStorage.getItem(STORAGE_KEYS.sessionId) || "",
+  reconnectToken: localStorage.getItem(STORAGE_KEYS.reconnectToken) || "",
   playerName: localStorage.getItem(STORAGE_KEYS.playerName) || "",
   roomCode: localStorage.getItem(STORAGE_KEYS.roomCode) || "",
   game: null,
   mode: "place",
   selectedTileId: null,
   dragTileId: null,
+  pointerDrag: null,
+  suppressRackClickUntil: 0,
   rackOrder: [],
   dropFeedbackCells: new Set(),
   exchangeIds: new Set(),
@@ -65,6 +78,7 @@ const dom = {
   toast: document.querySelector("#toast")
 };
 
+localStorage.removeItem(LEGACY_PLAYER_ID_KEY);
 dom.playerName.value = app.playerName;
 dom.roomCode.value = app.roomCode;
 
@@ -74,7 +88,8 @@ dom.joinForm.addEventListener("submit", (event) => {
 });
 
 dom.createRoomButton.addEventListener("click", () => {
-  joinRoom(dom.roomCode.value);
+  dom.roomCode.value = "";
+  joinRoom("", { createNewRoom: true });
 });
 
 dom.startButton.addEventListener("click", () => send({ type: "start" }));
@@ -93,6 +108,10 @@ dom.passButton.addEventListener("click", () => {
   send({ type: "pass" });
 });
 document.addEventListener("pointerdown", unlockAudioOnce, { once: true });
+document.addEventListener("pointermove", handlePointerDragMove, { passive: false });
+document.addEventListener("pointerup", handlePointerDragEnd);
+document.addEventListener("pointercancel", cancelPointerDrag);
+window.addEventListener("blur", cancelPointerDrag);
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     clearPending();
@@ -137,33 +156,41 @@ function scheduleReconnect() {
   app.reconnectTimer = window.setTimeout(() => {
     app.reconnectTimer = null;
     connect();
-    if (app.playerId && app.roomCode && app.playerName) {
+    if (shouldAutoJoinAfterReconnect(app)) {
       window.setTimeout(() => joinRoom(app.roomCode), 250);
     }
   }, delay);
 }
 
-function joinRoom(roomCode) {
-  const name = dom.playerName.value.trim();
-  if (!name) {
+function joinRoom(roomCode, options = {}) {
+  const join = createJoinRequest({
+    name: dom.playerName.value,
+    roomCode,
+    sessionId: app.sessionId,
+    reconnectToken: app.reconnectToken,
+    createNewRoom: Boolean(options.createNewRoom)
+  });
+
+  if (!join.playerName) {
     showToast("Oyuncu adı gerekli.");
     dom.playerName.focus();
     return;
   }
 
-  app.playerName = name;
-  app.roomCode = cleanRoomCode(roomCode);
+  app.playerName = join.playerName;
+  app.roomCode = join.roomCode;
   localStorage.setItem(STORAGE_KEYS.playerName, app.playerName);
-  if (app.roomCode) {
+  if (join.shouldClearStoredSession) {
+    app.sessionId = "";
+    app.reconnectToken = "";
+    localStorage.removeItem(STORAGE_KEYS.roomCode);
+    localStorage.removeItem(STORAGE_KEYS.sessionId);
+    localStorage.removeItem(STORAGE_KEYS.reconnectToken);
+  } else {
     localStorage.setItem(STORAGE_KEYS.roomCode, app.roomCode);
   }
 
-  send({
-    type: "join",
-    name: app.playerName,
-    roomCode: app.roomCode,
-    playerId: app.playerId || undefined
-  });
+  send(join.message);
 }
 
 function handleServerMessage(raw) {
@@ -176,9 +203,17 @@ function handleServerMessage(raw) {
   }
 
   if (message.type === "joined") {
-    app.playerId = message.playerId;
+    app.sessionId = message.sessionId || "";
+    if (message.reconnectToken) {
+      app.reconnectToken = message.reconnectToken;
+    }
     app.roomCode = message.roomCode;
-    localStorage.setItem(STORAGE_KEYS.playerId, app.playerId);
+    if (app.sessionId) {
+      localStorage.setItem(STORAGE_KEYS.sessionId, app.sessionId);
+    }
+    if (app.reconnectToken) {
+      localStorage.setItem(STORAGE_KEYS.reconnectToken, app.reconnectToken);
+    }
     localStorage.setItem(STORAGE_KEYS.roomCode, app.roomCode);
     dom.joinView.classList.add("hidden");
     dom.gameView.classList.remove("hidden");
@@ -235,6 +270,8 @@ function renderHeader() {
     dom.turnStatus.textContent = "Oyuncular bekleniyor";
   } else if (app.game.status === "finished") {
     dom.turnStatus.textContent = "Oyun bitti";
+  } else if (app.game.currentPlayerAfkRemainingMs !== null) {
+    dom.turnStatus.textContent = `${app.game.currentPlayerName || "Oyuncu"} AFK`;
   } else if (isMyTurn()) {
     dom.turnStatus.textContent = "Sıra sende";
   } else {
@@ -267,6 +304,8 @@ function renderBoard() {
         const key = cellKey(rowIndex, colIndex);
         const tile = cell.tile || (pending ? pendingTile(rackById.get(pending.tileId), pending.letter) : null);
         button.type = "button";
+        button.dataset.row = String(rowIndex);
+        button.dataset.col = String(colIndex);
         button.className = [
           "cell",
           cell.premium !== "NONE" ? `premium-${cell.premium}` : "",
@@ -371,7 +410,7 @@ function renderRack() {
     ...rackTiles.map((tile) => {
       const button = document.createElement("button");
       button.type = "button";
-      button.draggable = app.mode === "place" && app.game.status === "playing" && isMyTurn();
+      button.draggable = false;
       button.className = [
         "rack-tile",
         app.dragTileId === tile.id ? "dragging" : "",
@@ -382,6 +421,7 @@ function renderRack() {
         .join(" ");
       button.setAttribute("aria-label", `${tile.letter} taşı, ${tile.value} puan`);
       button.addEventListener("click", () => handleRackTileClick(tile));
+      button.addEventListener("pointerdown", (event) => handleRackPointerDown(event, tile));
       button.addEventListener("dragstart", (event) => handleRackDragStart(event, tile));
       button.addEventListener("dragend", handleRackDragEnd);
       button.append(tileElement(tile));
@@ -405,7 +445,10 @@ function renderMovePreview() {
   }
 
   if (!isMyTurn()) {
-    dom.movePreview.textContent = `${app.game.currentPlayerName || "Oyuncu"} hamle yapıyor`;
+    dom.movePreview.textContent =
+      app.game.currentPlayerAfkRemainingMs !== null
+        ? `${app.game.currentPlayerName || "Oyuncu"} AFK, sıra geçilecek`
+        : `${app.game.currentPlayerName || "Oyuncu"} hamle yapıyor`;
     return;
   }
 
@@ -440,7 +483,216 @@ function renderControls() {
   dom.exchangeModeButton.classList.toggle("selected", app.mode === "exchange");
 }
 
+function handleRackPointerDown(event, tile) {
+  if (event.pointerType === "mouse" && event.button !== 0) {
+    return;
+  }
+  if (app.mode !== "place" || app.game?.status !== "playing" || !isMyTurn()) {
+    return;
+  }
+
+  app.pointerDrag = {
+    tileId: tile.id,
+    pointerId: event.pointerId,
+    source: event.currentTarget,
+    startX: event.clientX,
+    startY: event.clientY,
+    lastX: event.clientX,
+    lastY: event.clientY,
+    started: false,
+    ghost: null,
+    overCell: null,
+    scrollFrame: null,
+    scrollSpeed: 0
+  };
+  event.currentTarget.setPointerCapture?.(event.pointerId);
+}
+
+function handlePointerDragMove(event) {
+  const drag = app.pointerDrag;
+  if (!drag || event.pointerId !== drag.pointerId) {
+    return;
+  }
+
+  drag.lastX = event.clientX;
+  drag.lastY = event.clientY;
+
+  if (!drag.started) {
+    const distance = Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY);
+    if (distance < POINTER_DRAG_THRESHOLD) {
+      return;
+    }
+    startPointerDrag(drag);
+  }
+
+  event.preventDefault();
+  positionDragGhost(drag, event.clientX, event.clientY);
+  updatePointerDragTarget(drag, event.clientX, event.clientY);
+  autoScrollPointerDrag(drag, event.clientY);
+}
+
+function handlePointerDragEnd(event) {
+  const drag = app.pointerDrag;
+  if (!drag || event.pointerId !== drag.pointerId) {
+    return;
+  }
+
+  const target = drag.overCell
+    ? {
+        row: Number(drag.overCell.dataset.row),
+        col: Number(drag.overCell.dataset.col)
+      }
+    : null;
+  const wasStarted = drag.started;
+  finishPointerDrag(drag);
+
+  if (!wasStarted) {
+    return;
+  }
+
+  event.preventDefault();
+  app.suppressRackClickUntil = Date.now() + 500;
+  if (target && canPlaceOnCell(target.row, target.col)) {
+    placeTileAt(drag.tileId, target.row, target.col, "drop");
+  } else {
+    render();
+  }
+}
+
+function cancelPointerDrag(event) {
+  const drag = app.pointerDrag;
+  if (!drag || (event?.pointerId !== undefined && event.pointerId !== drag.pointerId)) {
+    return;
+  }
+
+  const wasStarted = drag.started;
+  finishPointerDrag(drag);
+  if (wasStarted) {
+    render();
+  }
+}
+
+function startPointerDrag(drag) {
+  drag.started = true;
+  app.dragTileId = drag.tileId;
+  app.selectedTileId = drag.tileId;
+  app.exchangeIds.clear();
+  drag.source.classList.add("dragging");
+  drag.ghost = createDragGhost(drag.source);
+  document.body.append(drag.ghost);
+  document.body.classList.add("is-dragging-tile");
+  positionDragGhost(drag, drag.lastX, drag.lastY);
+  playSound("select");
+}
+
+function finishPointerDrag(drag) {
+  stopPointerAutoScroll(drag);
+  clearPointerDragTarget(drag);
+  drag.source.classList.remove("dragging");
+  try {
+    drag.source.releasePointerCapture?.(drag.pointerId);
+  } catch {
+    // The source can disappear if a state update re-renders the rack mid-drag.
+  }
+  drag.ghost?.remove();
+  document.body.classList.remove("is-dragging-tile");
+  app.pointerDrag = null;
+  app.dragTileId = null;
+}
+
+function createDragGhost(source) {
+  const sourceRect = source.getBoundingClientRect();
+  const ghost = document.createElement("div");
+  const tile = source.querySelector(".tile")?.cloneNode(true);
+  ghost.className = "tile-drag-ghost";
+  ghost.style.width = `${sourceRect.width}px`;
+  ghost.style.height = `${sourceRect.height}px`;
+  if (tile) {
+    ghost.append(tile);
+  }
+  return ghost;
+}
+
+function positionDragGhost(drag, x, y) {
+  if (!drag.ghost) {
+    return;
+  }
+  drag.ghost.style.left = `${x}px`;
+  drag.ghost.style.top = `${y}px`;
+}
+
+function updatePointerDragTarget(drag, x, y) {
+  const element = document.elementFromPoint(x, y);
+  const cell = element?.closest?.(".cell");
+  if (!cell || !dom.board.contains(cell)) {
+    clearPointerDragTarget(drag);
+    return;
+  }
+
+  const row = Number(cell.dataset.row);
+  const col = Number(cell.dataset.col);
+  if (!canPlaceOnCell(row, col)) {
+    clearPointerDragTarget(drag);
+    return;
+  }
+
+  if (drag.overCell !== cell) {
+    clearPointerDragTarget(drag);
+    drag.overCell = cell;
+    cell.classList.add("drag-over");
+  }
+}
+
+function clearPointerDragTarget(drag) {
+  drag.overCell?.classList.remove("drag-over");
+  drag.overCell = null;
+}
+
+function autoScrollPointerDrag(drag, y) {
+  const edgeSize = 86;
+  const maxSpeed = 26;
+  let speed = 0;
+
+  if (y < edgeSize) {
+    speed = -Math.ceil(((edgeSize - y) / edgeSize) * maxSpeed);
+  } else if (y > window.innerHeight - edgeSize) {
+    speed = Math.ceil(((y - (window.innerHeight - edgeSize)) / edgeSize) * maxSpeed);
+  }
+
+  drag.scrollSpeed = speed;
+  if (speed === 0) {
+    stopPointerAutoScroll(drag);
+    return;
+  }
+
+  if (!drag.scrollFrame) {
+    drag.scrollFrame = window.requestAnimationFrame(() => runPointerAutoScroll(drag));
+  }
+}
+
+function runPointerAutoScroll(drag) {
+  if (app.pointerDrag !== drag || !drag.started || drag.scrollSpeed === 0) {
+    drag.scrollFrame = null;
+    return;
+  }
+
+  window.scrollBy(0, drag.scrollSpeed);
+  updatePointerDragTarget(drag, drag.lastX, drag.lastY);
+  drag.scrollFrame = window.requestAnimationFrame(() => runPointerAutoScroll(drag));
+}
+
+function stopPointerAutoScroll(drag) {
+  if (drag.scrollFrame) {
+    window.cancelAnimationFrame(drag.scrollFrame);
+    drag.scrollFrame = null;
+  }
+  drag.scrollSpeed = 0;
+}
+
 function handleRackTileClick(tile) {
+  if (Date.now() < app.suppressRackClickUntil) {
+    return;
+  }
   if (app.game?.status !== "playing") {
     showToast("Oyun başlamadan taş seçilemez.");
     return;
@@ -542,7 +794,7 @@ function placeTileAt(tileId, row, col, source) {
 
   let letter = tile.letter;
   if (tile.blank) {
-    letter = normalizeLetter(window.prompt("Boş taş için harf gir:", "") || "");
+    letter = normalizeBlankTileInput(window.prompt("Boş taş için harf gir:", "") || "");
     if (!letter) {
       showToast("Boş taş için harf seçilmedi.");
       return false;
@@ -763,11 +1015,9 @@ function updateTimerDisplay() {
     return;
   }
 
-  const elapsed = performance.now() - (app.game.receivedAt || performance.now());
-  const remainingMs = Math.max(0, app.game.turnRemainingMs - elapsed);
-  const seconds = Math.ceil(remainingMs / 1000);
-  dom.timerStatus.textContent = `Süre: ${seconds}s`;
-  dom.timerStatus.classList.toggle("danger", seconds <= 10);
+  const timer = timerDisplayState(app.game, performance.now());
+  dom.timerStatus.textContent = timer.text;
+  dom.timerStatus.classList.toggle("danger", timer.danger);
 }
 
 function formatClock(milliseconds) {
@@ -1094,13 +1344,6 @@ function boardCellLabel(row, col, cell, tile, pending) {
   }
   const premium = premiumLabel(cell.premium);
   return `${row + 1}. satır ${col + 1}. sütun${premium ? `, ${premium}` : ""}`;
-}
-
-function cleanRoomCode(value) {
-  return String(value || "")
-    .replace(/[^A-Za-z0-9]/g, "")
-    .toUpperCase()
-    .slice(0, 8);
 }
 
 function cellKey(row, col) {

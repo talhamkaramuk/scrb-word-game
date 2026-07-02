@@ -5,6 +5,7 @@ export const MAX_PLAYERS = 10;
 export const MIN_PLAYERS = 2;
 export const MAX_NAME_LENGTH = 24;
 export const BINGO_BONUS = 35;
+export const AFK_GRACE_MS = 15 * 1000;
 export const GAME_MODES = Object.freeze({
   CLASSIC: "classic",
   TIMED_15: "timed15",
@@ -296,7 +297,8 @@ export function addPlayer(game, { id, name, connected = true } = {}) {
   const existing = game.players.find((player) => player.id === id);
   if (existing) {
     existing.name = sanitizeName(name || existing.name);
-    existing.connected = connected;
+    existing.connected = Boolean(connected);
+    existing.disconnectedAt = connected ? null : existing.disconnectedAt || Date.now();
     touch(game);
     return existing;
   }
@@ -316,7 +318,7 @@ export function addPlayer(game, { id, name, connected = true } = {}) {
     score: 0,
     rack: [],
     connected,
-    ready: false,
+    disconnectedAt: connected ? null : Date.now(),
     joinedAt: Date.now()
   };
 
@@ -327,21 +329,25 @@ export function addPlayer(game, { id, name, connected = true } = {}) {
   return player;
 }
 
-export function setPlayerConnection(game, playerId, connected) {
+export function setPlayerConnection(game, playerId, connected, now = Date.now()) {
   const player = getPlayer(game, playerId);
   if (!player) {
     return false;
   }
-  player.connected = connected;
+
+  const nextConnected = Boolean(connected);
+  if (nextConnected) {
+    player.connected = true;
+    player.disconnectedAt = null;
+  } else {
+    if (player.connected || !player.disconnectedAt) {
+      player.disconnectedAt = now;
+    }
+    player.connected = false;
+  }
+
   touch(game);
   return true;
-}
-
-export function setReady(game, playerId, ready) {
-  const player = requirePlayer(game, playerId);
-  player.ready = Boolean(ready);
-  touch(game);
-  return player.ready;
 }
 
 export function setGameSettings(game, actorPlayerId, settings = {}) {
@@ -374,7 +380,6 @@ export function startGame(game, actorPlayerId) {
 
   for (const player of game.players) {
     drawTiles(game, player);
-    player.ready = true;
   }
 
   const now = Date.now();
@@ -498,6 +503,10 @@ export function serializeGame(game, viewerId) {
   const me = game.players.find((player) => player.id === viewerId) || null;
   const currentPlayer = game.players.find((player) => player.id === game.currentPlayerId) || null;
   const hostPlayer = game.players.find((player) => player.id === game.hostId) || null;
+  const currentPlayerAfkDeadlineAt = currentPlayerAfkDeadline(game, currentPlayer);
+  const effectiveTurnDeadlineAt = earliestDeadline(game.turnDeadlineAt, currentPlayerAfkDeadlineAt);
+  const afkDeadlineIsEffective =
+    currentPlayerAfkDeadlineAt !== null && effectiveTurnDeadlineAt === currentPlayerAfkDeadlineAt;
   return {
     code: game.code,
     status: game.status,
@@ -516,7 +525,6 @@ export function serializeGame(game, viewerId) {
       score: player.score,
       rackCount: player.rack.length,
       connected: player.connected,
-      ready: player.ready,
       host: player.id === game.hostId
     })),
     me: me
@@ -532,6 +540,7 @@ export function serializeGame(game, viewerId) {
     hostId: hostPlayer ? publicPlayerId(hostPlayer) : null,
     currentPlayerId: currentPlayer ? publicPlayerId(currentPlayer) : null,
     currentPlayerName: currentPlayer?.name || null,
+    currentPlayerAfkRemainingMs: afkDeadlineIsEffective ? Math.max(0, currentPlayerAfkDeadlineAt - now) : null,
     bagCount: game.bag.length,
     settings: { ...game.settings },
     wordsPlayed: game.wordsPlayed,
@@ -541,8 +550,8 @@ export function serializeGame(game, viewerId) {
     gameDeadlineAt: game.gameDeadlineAt,
     gameRemainingMs: game.gameDeadlineAt ? Math.max(0, game.gameDeadlineAt - now) : null,
     turnStartedAt: game.turnStartedAt,
-    turnDeadlineAt: game.turnDeadlineAt,
-    turnRemainingMs: game.turnDeadlineAt ? Math.max(0, game.turnDeadlineAt - now) : null,
+    turnDeadlineAt: effectiveTurnDeadlineAt,
+    turnRemainingMs: effectiveTurnDeadlineAt ? Math.max(0, effectiveTurnDeadlineAt - now) : null,
     serverNow: now,
     dictionaryMode: game.strictDictionary ? "strict" : "open",
     dictionaryCount: game.dictionary?.size || 0,
@@ -563,18 +572,23 @@ export function expireTurnIfNeeded(game, now = Date.now()) {
     return true;
   }
 
-  if (!game.turnDeadlineAt || now < game.turnDeadlineAt) {
-    return false;
-  }
-
   const player = game.players[game.turnIndex];
   if (!player) {
     return false;
   }
 
+  const afkDeadlineAt = currentPlayerAfkDeadline(game, player);
+  const turnExpired = Boolean(game.turnDeadlineAt && now >= game.turnDeadlineAt);
+  const afkExpired = Boolean(afkDeadlineAt && now >= afkDeadlineAt);
+  if (!turnExpired && !afkExpired) {
+    return false;
+  }
+
   game.lastMoveCells = [];
   game.consecutivePasses += 1;
-  logMove(game, `${player.name} süre dolduğu için pas geçti.`);
+  const afkExpiresFirst = afkExpired && (!turnExpired || afkDeadlineAt <= game.turnDeadlineAt);
+  const passReason = afkExpiresFirst ? "AFK kaldığı için" : "süre dolduğu için";
+  logMove(game, `${player.name} ${passReason} pas geçti.`);
 
   if (game.consecutivePasses >= Math.max(2, game.players.length * 2)) {
     finishGame(game, "Arka arkaya pas sınırı doldu.");
@@ -897,6 +911,20 @@ function advanceTurn(game, now = Date.now()) {
   game.turnIndex = (game.turnIndex + 1) % game.players.length;
   game.currentPlayerId = game.players[game.turnIndex].id;
   beginTurn(game, now);
+}
+
+function currentPlayerAfkDeadline(game, player) {
+  if (!player || player.connected || game.status !== "playing" || game.turnStartedAt === null) {
+    return null;
+  }
+
+  const disconnectedAt = Number.isFinite(player.disconnectedAt) ? player.disconnectedAt : game.turnStartedAt;
+  return Math.max(disconnectedAt, game.turnStartedAt) + AFK_GRACE_MS;
+}
+
+function earliestDeadline(...deadlines) {
+  const validDeadlines = deadlines.filter((deadline) => Number.isFinite(deadline));
+  return validDeadlines.length > 0 ? Math.min(...validDeadlines) : null;
 }
 
 function touchesExistingTile(board, pendingTiles) {

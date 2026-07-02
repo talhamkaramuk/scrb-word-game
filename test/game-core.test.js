@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  AFK_GRACE_MS,
   CENTER_INDEX,
+  MAX_PLAYERS,
   addPlayer,
   applyMove,
   createGame,
@@ -11,6 +13,7 @@ import {
   passTurn,
   serializeGame,
   setGameSettings,
+  setPlayerConnection,
   startGame
 } from "../src/shared/game-core.js";
 
@@ -37,6 +40,19 @@ test("requires at least two players to start", () => {
   addPlayer(game, { id: "p1", name: "Ada" });
 
   assert.throws(() => startGame(game, "p1"), /en az 2 oyuncu/);
+});
+
+test("simple host-start model does not expose player readiness", () => {
+  const game = createGame({ code: "TST", random: createSeededRandom(14) });
+  addPlayer(game, { id: "p1", name: "Ada" });
+  addPlayer(game, { id: "p2", name: "Bora" });
+
+  const waitingState = serializeGame(game, "p1");
+  assert.equal(Object.hasOwn(waitingState.players[0], "ready"), false);
+
+  startGame(game, "p1");
+  assert.equal(Object.hasOwn(game.players[0], "ready"), false);
+  assert.equal(Object.hasOwn(serializeGame(game, "p1").players[0], "ready"), false);
 });
 
 test("first move must cross center", () => {
@@ -180,6 +196,51 @@ test("expired turn is passed automatically", () => {
   assert.equal(expired, true);
   assert.equal(game.currentPlayerId, "p2");
   assert.equal(game.turnStartedAt, expiredAt);
+});
+
+test("disconnected active player is passed after AFK grace", () => {
+  const game = preparedGame({ settings: { turnSeconds: 60 } });
+  const disconnectedAt = game.turnStartedAt + 1000;
+
+  setPlayerConnection(game, "p1", false, disconnectedAt);
+
+  assert.equal(expireTurnIfNeeded(game, disconnectedAt + AFK_GRACE_MS - 1), false);
+  assert.equal(game.currentPlayerId, "p1");
+  assert.equal(expireTurnIfNeeded(game, disconnectedAt + AFK_GRACE_MS), true);
+  assert.equal(game.currentPlayerId, "p2");
+  assert.match(game.moveLog.at(-1).text, /AFK/);
+});
+
+test("reconnected active player keeps the current turn before AFK grace expires", () => {
+  const game = preparedGame({ settings: { turnSeconds: 60 } });
+  const disconnectedAt = game.turnStartedAt + 1000;
+
+  setPlayerConnection(game, "p1", false, disconnectedAt);
+  setPlayerConnection(game, "p1", true, disconnectedAt + 10_000);
+
+  assert.equal(expireTurnIfNeeded(game, disconnectedAt + AFK_GRACE_MS + 1000), false);
+  assert.equal(game.currentPlayerId, "p1");
+});
+
+test("room model keeps host authority while the host is disconnected", () => {
+  const game = createGame({ code: "TST", random: createSeededRandom(15) });
+  addPlayer(game, { id: "p1", name: "Ada" });
+  addPlayer(game, { id: "p2", name: "Bora" });
+
+  setPlayerConnection(game, "p1", false, Date.now());
+
+  assert.equal(game.hostId, "p1");
+  assert.equal(game.players[0].connected, false);
+  assert.throws(() => startGame(game, "p2"), /yalnızca oda sahibi/);
+});
+
+test("room model rejects players above the configured maximum", () => {
+  const game = createGame({ code: "TST", random: createSeededRandom(16) });
+  for (let index = 1; index <= MAX_PLAYERS; index += 1) {
+    addPlayer(game, { id: `p${index}`, name: `P${index}` });
+  }
+
+  assert.throws(() => addPlayer(game, { id: "p-over", name: "Fazla" }), /en fazla/);
 });
 
 function preparedGame(overrides = {}) {
